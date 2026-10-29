@@ -2,44 +2,67 @@ import os
 import pandas as pd
 import streamlit as st
 
-# Archivo local donde se guardan los datos en la nube
-DATA_FILE = "registro_maquinas.csv"
+# Archivos locales en la nube para guardar datos
+MAQUINAS_FILE = "registro_maquinas.csv"
+HISTORIAL_FILE = "historial_gastos.csv"
 LIMITE_ACEITE = 50  # Alerta cada 50 horas
 
 st.set_page_config(
     page_title="Mantenimiento Landscaping", page_icon="🚜", layout="centered"
 )
-st.title("🚜 Control de Mantenimiento")
-st.write("Historial y alertas para tu equipo de Landscaping.")
+st.title("🚜 Control de Mantenimiento y Gastos")
+st.write("Controla las alertas de servicio y el dinero invertido en tus equipos.")
 
 
-# Funciones para Cargar y Guardar Datos
-def cargar_datos():
-    if os.path.exists(DATA_FILE):
-        return pd.read_csv(DATA_FILE)
+# --- FUNCIONES DE ALMACENAMIENTO ---
+def cargar_maquinas():
+    if os.path.exists(MAQUINAS_FILE):
+        return pd.read_csv(MAQUINAS_FILE)
     return pd.DataFrame(
         columns=["Máquina", "Marca/Modelo", "Horas Actuales", "Último Cambio"]
     )
 
 
-def guardar_datos(df):
-    df.to_csv(DATA_FILE, index=False)
+def cargar_historial():
+    if os.path.exists(HISTORIAL_FILE):
+        return pd.read_csv(HISTORIAL_FILE)
+    return pd.DataFrame(
+        columns=["Máquina", "Fecha", "Detalle / Pieza", "Costo ($)"]
+    )
 
 
-df = cargar_datos()
+def guardar_datos(df, filename):
+    df.to_csv(filename, index=False)
 
-# --- SISTEMA DE ALERTAS ---
+
+# Cargar datos actuales
+df_maq = cargar_maquinas()
+df_hist = cargar_historial()
+
+# --- CÁLCULO DE GASTOS TOTALES POR MÁQUINA ---
+gastos_totales = {}
+if not df_hist.empty:
+    # Asegurar que el costo sea numérico
+    df_hist["Costo ($)"] = pd.to_numeric(df_hist["Costo ($)"], errors="coerce")
+    # Agrupar la suma de costos por máquina
+    gastos_totales = df_hist.groupby("Máquina")["Costo ($)"].sum().to_dict()
+
+# --- SISTEMA DE ALERTAS (ACEITE) ---
 st.subheader("🚨 Alertas de Servicio")
-if not df.empty:
-    # Asegurar que las columnas sean numéricas antes del cálculo
-    df["Horas Actuales"] = pd.to_numeric(df["Horas Actuales"], errors="coerce")
-    df["Último Cambio"] = pd.to_numeric(df["Último Cambio"], errors="coerce")
+if not df_maq.empty:
+    df_maq["Horas Actuales"] = pd.to_numeric(
+        df_maq["Horas Actuales"], errors="coerce"
+    )
+    df_maq["Último Cambio"] = pd.to_numeric(
+        df_maq["Último Cambio"], errors="coerce"
+    )
 
-    df["Horas Desde Cambio"] = df["Horas Actuales"] - df["Último Cambio"]
-    df["Hrs Restantes"] = LIMITE_ACEITE - df["Horas Desde Cambio"]
+    df_maq["Horas Desde Cambio"] = (
+        df_maq["Horas Actuales"] - df_maq["Último Cambio"]
+    )
+    df_maq["Hrs Restantes"] = LIMITE_ACEITE - df_maq["Horas Desde Cambio"]
 
-    # Filtrar máquinas que necesitan atención urgente
-    alertas = df[df["Hrs Restantes"] <= 0]
+    alertas = df_maq[df_maq["Hrs Restantes"] <= 0]
     if not alertas.empty:
         for idx, row in alertas.iterrows():
             st.error(
@@ -50,53 +73,104 @@ if not df.empty:
 else:
     st.info("No hay máquinas registradas aún.")
 
-# --- TABLA DE INVENTARIO ---
-st.subheader("📋 Inventario Actual")
-if not df.empty:
-    # Mostrar tabla simplificada para pantallas de celular
+# --- TABLA DE INVENTARIO Y GASTOS ---
+st.subheader("📋 Inventario y Gasto Acumulado")
+if not df_maq.empty:
+    # Agregar columna de gasto total calculado al inventario visible
+    df_maq["Total Gastado ($)"] = df_maq["Máquina"].map(gastos_totales).fillna(0.0)
+
     st.dataframe(
-        df[["Máquina", "Horas Actuales", "Último Cambio", "Hrs Restantes"]],
+        df_maq[
+            [
+                "Máquina",
+                "Horas Actuales",
+                "Hrs Restantes",
+                "Total Gastado ($)",
+            ]
+        ],
         use_container_width=True,
         hide_index=True,
     )
 
-    # Botón Rápido de Mantenimiento
+    # --- SECCIÓN: REGISTRAR MANTENIMIENTO Y GASTO ---
     st.write("---")
+    st.subheader("🔧 Registrar Servicio / Gasto de Repuesto")
+
     maquina_mant = st.selectbox(
-        "Selecciona máquina para registrar servicio:", df["Máquina"]
+        "Selecciona la máquina que recibió el servicio:", df_maq["Máquina"]
     )
-    if st.button("🔧 Registrar Cambio de Aceite Hecho Hoy"):
-        idx = df[df["Máquina"] == maquina_mant].index
-        df.at[idx, "Último Cambio"] = df.at[idx, "Horas Actuales"]
-        guardar_datos(df)
-        st.toast("¡Mantenimiento guardado!")
-        st.rerun()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        fecha_serv = st.date_input("Fecha del trabajo:")
+        pieza_cambiada = st.text_input(
+            "Pieza cambiada / Detalle:",
+            placeholder="Ej: Filtro de aire y bujía",
+        )
+    with col2:
+        costo_repuesto = st.number_input(
+            "Costo total del repuesto / reparación ($):",
+            min_value=0.0,
+            step=1.0,
+        )
+        cambio_aceite_check = st.checkbox(
+            "¿Este servicio incluyó Cambio de Aceite?"
+        )
+
+    if st.button("🔧 Guardar Servicio y Gasto"):
+        if pieza_cambiada:
+            # 1. Guardar en el historial de gastos
+            nueva_fila_hist = pd.DataFrame(
+                [[maquina_mant, str(fecha_serv), pieza_cambiada, costo_repuesto]],
+                columns=df_hist.columns[:4],
+            )
+            df_hist = pd.concat([df_hist, nueva_fila_hist], ignore_index=True)
+            guardar_datos(df_hist, HISTORIAL_FILE)
+
+            # 2. Si marcó cambio de aceite, actualizar las horas en el inventario
+            if cambio_aceite_check:
+                idx = df_maq[df_maq["Máquina"] == maquina_mant].index
+                df_maq.at[idx, "Último Cambio"] = df_maq.at[idx, "Horas Actuales"]
+                guardar_datos(df_maq, MAQUINAS_FILE)
+
+            st.toast("¡Servicio y gasto registrados correctamente!")
+            st.rerun()
+        else:
+            st.warning("Por favor detalla qué pieza se cambió o el trabajo realizado.")
+
+# --- SECCIÓN: VER HISTORIAL DE BITÁCORA ---
+if not df_hist.empty:
+    st.write("---")
+    with st.expander("📚 Ver Historial Completo de Reparaciones y Notas"):
+        st.dataframe(df_hist, use_container_width=True, hide_index=True)
 
 # --- AGREGAR O ACTUALIZAR MÁQUINA ---
 st.write("---")
 with st.expander("➕ Registrar Nueva Máquina / Actualizar Horas"):
-    nombre = st.text_input("Nombre o ID de la máquina (Ej: Cortacésped 01):")
+    nombre = st.text_input("Nombre o ID de la máquina (Ej: Toro Z-Master 01):")
     marca = st.text_input("Marca / Modelo:")
-    horas = st.number_input("Horas actuales de motor:", min_value=0.0, step=1.0)
+    horas = st.number_input(
+        "Horas actuales de motor:", min_value=0.0, step=1.0, key="new_hrs"
+    )
     aceite = st.number_input(
-        "Horas que tenía en su último cambio de aceite:", min_value=0.0, step=1.0
+        "Horas del último cambio de aceite:", min_value=0.0, step=1.0, key="new_oil"
     )
 
     if st.button("💾 Guardar Equipo"):
         if nombre:
-            # Si existe, actualiza; si no, añade
-            if nombre in df["Máquina"].values:
-                df.loc[
-                    df["Máquina"] == nombre,
+            if nombre in df_maq["Máquina"].values:
+                df_maq.loc[
+                    df_maq["Máquina"] == nombre,
                     ["Marca/Modelo", "Horas Actuales", "Último Cambio"],
                 ] = [marca, horas, aceite]
             else:
                 new_row = pd.DataFrame(
-                    [[nombre, marca, horas, aceite]], columns=df.columns[:4]
+                    [[nombre, marca, horas, aceite]], columns=df_maq.columns[:4]
                 )
-                df = pd.concat([df, new_row], ignore_index=True)
-            guardar_datos(df)
+                df_maq = pd.concat([df_maq, new_row], ignore_index=True)
+            guardar_datos(df_maq, MAQUINAS_FILE)
             st.success(f"¡{nombre} guardado con éxito!")
             st.rerun()
         else:
             st.warning("Por favor escribe un nombre o ID.")
+
